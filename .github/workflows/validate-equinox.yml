@@ -1,0 +1,51 @@
+name: Validate Equinox submission
+on:
+  push:
+    branches: [codex/validate-equinox]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e
+        with:
+          node-version: 22
+      - run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Official lint including public image and architectures
+        run: |
+          set +e
+          node .tools/lint-apps.mjs equinox --check-images --format json > lint.json
+          result=$?
+          set -e
+          cat lint.json
+          test "$result" -eq 1
+          node --input-type=module <<'JS'
+          import fs from 'node:fs';
+          const result = JSON.parse(fs.readFileSync('lint.json','utf8'));
+          const allowed = result.issues.filter(i => i.rule === 'manifest.submission');
+          const unexpected = result.issues.filter(i => i.rule !== 'manifest.submission');
+          if (allowed.length !== 2 || unexpected.length) throw new Error(JSON.stringify(result.issues));
+          fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, '## Equinox package checks\nOfficial lint found only the two expected messages for the empty submission URL. The actual PR URL will be set after owner approval. No other errors or warnings, including public image, multi-architecture manifest, ports, storage and executable hook checks.\n');
+          JS
+      - name: Hook syntax and isolated settings-copy check
+        run: |
+          test -x equinox/hooks/pre-start
+          bash -n equinox/hooks/pre-start
+          scratch=$(mktemp -d)
+          trap 'rm -rf "$scratch"' EXIT
+          mkdir -p "$scratch/app" "$scratch/moved-data"
+          printf '%s\n' 'folderAccess: []' > "$scratch/app/settings.yml"
+          APP_DATA_DIR="$scratch/app" APP_DATA_ROOT="$scratch/moved-data" bash equinox/hooks/pre-start
+          cmp "$scratch/app/settings.yml" "$scratch/moved-data/umbrel-settings.yml"
+          APP_DATA_DIR="$scratch/app" APP_DATA_ROOT="$scratch/moved-data" bash equinox/hooks/pre-start
+          rm "$scratch/app/settings.yml"
+          APP_DATA_DIR="$scratch/app" APP_DATA_ROOT="$scratch/moved-data" bash equinox/hooks/pre-start
+          test ! -e "$scratch/moved-data/umbrel-settings.yml"
+          git diff --check
+      - uses: actions/upload-artifact@v6
+        if: always()
+        with:
+          name: equinox-lint
+          path: lint.json
